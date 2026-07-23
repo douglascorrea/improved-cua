@@ -422,21 +422,64 @@ fn class_responds_to_selector(cls: *mut c_void, sel: *mut c_void) -> bool {
 
 // ── SLSEventRecord extraction ──────────────────────────────────────────────
 
+/// Offset of the `SLSEventRecord *` field inside `__CGEvent` for a macOS
+/// version, or `None` when the layout is unverified on that version.
+///
+/// Layout (SkyLight ObjC type encodings): `{CFRuntimeBase, uint32_t,
+/// SLSEventRecord *}`. On 64-bit: CFRuntimeBase = 16 bytes, uint32 = 4,
+/// 4 bytes padding → record pointer at offset 24. Verified stable on
+/// every 64-bit macOS from 13 (Ventura) through 26 (Tahoe). Outside that
+/// range is a checked failure — this function never probes raw offsets
+/// hoping one reads non-null (the pre-#8 behavior).
+fn event_record_offset(version: crate::version_matrix::MacOsVersion) -> Option<usize> {
+    match version.major {
+        13..=26 => Some(24),
+        _ => None,
+    }
+}
+
 /// Extract the embedded `SLSEventRecord *` from a `CGEvent`.
 ///
-/// Layout of `__CGEvent` (SkyLight ObjC type encodings):
-///   `{CFRuntimeBase, uint32_t, SLSEventRecord *}`
-/// On 64-bit: CFRuntimeBase=16, uint32=4, 4 bytes pad → record pointer at offset 24.
-/// We probe offsets 24, 32, 16 for resilience across OS versions (same as Swift).
+/// Checked, version-gated resolution: the offset comes from
+/// [`event_record_offset`], and the pointer read is validated (non-null,
+/// pointer-aligned) before use. Every failure mode logs once per process
+/// and returns null, which makes the caller skip the auth envelope — the
+/// same graceful degradation as a missing SPI, but never silent.
 unsafe fn extract_event_record(event_ptr: *mut c_void) -> *mut c_void {
-    for &offset in &[24usize, 32, 16] {
-        let slot = (event_ptr as *const u8).add(offset).cast::<*mut c_void>();
-        let p = std::ptr::read_unaligned(slot);
-        if !p.is_null() {
-            return p;
-        }
+    let version = crate::version_matrix::macos_version();
+    let Some(offset) = event_record_offset(version) else {
+        static GATE_WARN: std::sync::Once = std::sync::Once::new();
+        GATE_WARN.call_once(|| {
+            tracing::warn!(
+                "__CGEvent layout unverified on macOS {version} — skipping keyboard \
+                 auth envelope (checked failure; extend event_record_offset for this OS)"
+            );
+        });
+        return std::ptr::null_mut();
+    };
+    let slot = (event_ptr as *const u8).add(offset).cast::<*mut c_void>();
+    let record = std::ptr::read_unaligned(slot);
+    if record.is_null() {
+        static NULL_WARN: std::sync::Once = std::sync::Once::new();
+        NULL_WARN.call_once(|| {
+            tracing::warn!(
+                "SLSEventRecord pointer null at verified offset {offset} — \
+                 skipping keyboard auth envelope"
+            );
+        });
+        return std::ptr::null_mut();
     }
-    std::ptr::null_mut()
+    if (record as usize) % std::mem::align_of::<*mut c_void>() != 0 {
+        static ALIGN_WARN: std::sync::Once = std::sync::Once::new();
+        ALIGN_WARN.call_once(|| {
+            tracing::warn!(
+                "SLSEventRecord pointer {record:p} misaligned at offset {offset} — \
+                 __CGEvent layout drift on macOS {version}? skipping auth envelope"
+            );
+        });
+        return std::ptr::null_mut();
+    }
+    record
 }
 
 // ── Public entry points ────────────────────────────────────────────────────
@@ -874,5 +917,71 @@ mod tests {
             symbol_resolved("SLSGetWindowOwner"),
             "resolution must recover once the forced absence is lifted"
         );
+    }
+
+    // ── Version-gated SLSEventRecord extraction (G9) ─────────────────
+
+    #[test]
+    fn event_record_offset_is_version_gated() {
+        use crate::version_matrix::MacOsVersion;
+        assert_eq!(event_record_offset(MacOsVersion::new(13, 0, 0)), Some(24));
+        assert_eq!(event_record_offset(MacOsVersion::new(15, 7, 1)), Some(24));
+        assert_eq!(event_record_offset(MacOsVersion::new(26, 5, 2)), Some(24));
+        // Unknown/unsupported versions are a checked failure, never a probe.
+        assert_eq!(event_record_offset(MacOsVersion::new(12, 7, 6)), None);
+        assert_eq!(event_record_offset(MacOsVersion::new(27, 0, 0)), None);
+        assert_eq!(event_record_offset(MacOsVersion::new(0, 0, 0)), None);
+    }
+
+    /// Fabricated `__CGEvent` buffer: 64 bytes, pointer-aligned.
+    fn fake_event(writes: &[(usize, *mut c_void)]) -> [u64; 8] {
+        let mut buf = [0u64; 8];
+        for &(offset, ptr) in writes {
+            assert_eq!(offset % 8, 0, "test writes must be pointer-aligned");
+            buf[offset / 8] = ptr as usize as u64;
+        }
+        buf
+    }
+
+    static FAKE_RECORD: u64 = 0xDEAD;
+
+    #[test]
+    fn extract_reads_the_verified_offset() {
+        let record_ptr = &FAKE_RECORD as *const u64 as *mut c_void;
+        let mut buf = fake_event(&[(24, record_ptr)]);
+        let got = unsafe { extract_event_record(buf.as_mut_ptr() as *mut c_void) };
+        assert_eq!(got, record_ptr);
+    }
+
+    #[test]
+    fn extract_does_not_probe_other_offsets() {
+        // The old resolver probed offsets 24/32/16 and took the first
+        // non-null pointer. With null at the verified offset and a valid
+        // pointer at 32, checked resolution must return null — never the
+        // probed garbage.
+        let record_ptr = &FAKE_RECORD as *const u64 as *mut c_void;
+        let mut buf = fake_event(&[(32, record_ptr)]);
+        let got = unsafe { extract_event_record(buf.as_mut_ptr() as *mut c_void) };
+        assert!(
+            got.is_null(),
+            "no raw offset probing: a non-null slot at 32 must not be picked up"
+        );
+    }
+
+    #[test]
+    fn extract_rejects_misaligned_record_pointer() {
+        let mut buf = fake_event(&[(24, 0x1001usize as *mut c_void)]);
+        let got = unsafe { extract_event_record(buf.as_mut_ptr() as *mut c_void) };
+        assert!(
+            got.is_null(),
+            "a misaligned record pointer is layout drift — checked failure"
+        );
+    }
+
+    #[test]
+    fn extract_rejects_null_record_pointer() {
+        let mut buf = fake_event(&[]);
+        let got = unsafe { extract_event_record(buf.as_mut_ptr() as *mut c_void) };
+        assert!(got.is_null());
     }
 }
