@@ -264,7 +264,7 @@ fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 pub(crate) mod test_hook {
     use super::lock;
     use std::collections::HashSet;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     static FORCED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
     static GATE: OnceLock<Mutex<()>> = OnceLock::new();
@@ -301,6 +301,43 @@ pub(crate) mod test_hook {
         let gate = hold_gate();
         lock(forced()).insert(name);
         ForcedAbsence { name, _gate: gate }
+    }
+
+    // ── Log capture ──────────────────────────────────────────────────
+
+    /// In-memory tracing writer so tests can assert a fallback was logged.
+    #[derive(Clone, Default)]
+    struct SharedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for SharedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLog {
+        type Writer = SharedLog;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Run `body` under a thread-scoped subscriber (DEBUG and above)
+    /// that captures into memory; return everything logged while it ran.
+    pub(crate) fn captured_logs(body: impl FnOnce()) -> String {
+        let log = SharedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(log.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, body);
+        let bytes = log.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
     }
 }
 
@@ -800,41 +837,7 @@ pub fn with_menu_shortcut_activation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
-
-    /// In-memory tracing writer so tests can assert a fallback was logged.
-    #[derive(Clone, Default)]
-    struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-    impl std::io::Write for SharedLog {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedLog {
-        type Writer = SharedLog;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// Run `body` under a thread-scoped subscriber that captures into
-    /// memory; return everything logged while it ran.
-    fn captured_logs(body: impl FnOnce()) -> String {
-        let log = SharedLog::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(log.clone())
-            .finish();
-        tracing::subscriber::with_default(subscriber, body);
-        let bytes = log.0.lock().unwrap().clone();
-        String::from_utf8(bytes).unwrap()
-    }
+    use test_hook::captured_logs;
 
     #[test]
     fn skylight_framework_load_is_checked_and_succeeds() {
