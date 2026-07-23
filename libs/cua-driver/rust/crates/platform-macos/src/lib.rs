@@ -35,6 +35,8 @@ pub mod terminal;
 #[cfg(target_os = "macos")]
 pub mod tools;
 #[cfg(target_os = "macos")]
+pub mod version_matrix;
+#[cfg(target_os = "macos")]
 pub mod video_sckit;
 #[cfg(target_os = "macos")]
 pub mod window_change_detector;
