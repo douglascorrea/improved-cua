@@ -49,25 +49,8 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 platform-macos = { path = "../platform-macos" }
 
-[target.'cfg(target_os = "windows")'.dependencies]
-platform-windows = { path = "../platform-windows" }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-platform-linux = { path = "../platform-linux" }
-
 [features]
 default = []
-# GNOME/KDE portal input ships in ordinary Linux releases; PipeWire capture
-# remains a separate modern-desktop feature. The combined name stays as a
-# compatibility alias for Nix and downstream builds.
-portal-input = ["platform-linux/portal-input"]
-portal-capture = ["platform-linux/portal-capture"]
-portal-libei = ["platform-linux/portal-libei"]
-
-[target.'cfg(target_os = "windows")'.build-dependencies]
-# Embed the Windows manifest for DPI awareness (fixes coordinate mismatches
-# at 125%/150%/200% scaling).
-embed-resource = "2"
 
 [dev-dependencies]
 # Shared integration-test harness (MCP/CLI transports, child reaping, paths,
@@ -83,17 +66,3 @@ tempfile = "3"
 futures-util = "0.3"
 tokio-tungstenite = "0.24"
 
-[target.'cfg(target_os = "windows")'.dev-dependencies]
-platform-windows = { path = "../platform-windows" }
-windows = { version = "0.61", features = [
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_Foundation",
-    # Job Object: assign every spawned test child to a KILL_ON_JOB_CLOSE job so
-    # the OS terminates the whole tree when the test process dies for ANY reason
-    # (including SIGKILL / Ctrl-C) — guarantees no orphaned windows or held ports.
-    "Win32_System_JobObjects",
-    # CreateJobObjectW's signature references SECURITY_ATTRIBUTES;
-    # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds IO_COUNTERS (Threading).
-    "Win32_Security",
-    "Win32_System_Threading",
-] }

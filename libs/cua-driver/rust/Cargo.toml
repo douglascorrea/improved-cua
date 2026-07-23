@@ -6,11 +6,8 @@ members = [
     "crates/cua-driver-sdk",
     "crates/cua-driver-bindgen",
     "crates/cua-driver-testkit",
-    "crates/cua-driver-uia",
     "crates/cua-driver-core",
     "crates/platform-macos",
-    "crates/platform-windows",
-    "crates/platform-linux",
     "crates/cursor-overlay",
     "crates/pip-preview",
 ]
