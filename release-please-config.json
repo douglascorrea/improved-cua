@@ -61,23 +61,6 @@
           "path": "rust/Skills/cua-driver/SKILL.md"
         }
       ]
-    },
-    "libs/lume": {
-      "release-type": "simple",
-      "component": "lume",
-      "package-name": "lume",
-      "version-file": "VERSION",
-      "changelog-path": "CHANGELOG.md",
-      "extra-files": [
-        {
-          "type": "generic",
-          "path": "src/Main.swift"
-        },
-        {
-          "type": "generic",
-          "path": "scripts/install.sh"
-        }
-      ]
     }
   }
 }
