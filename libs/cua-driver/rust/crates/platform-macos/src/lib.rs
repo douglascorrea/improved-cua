@@ -41,6 +41,9 @@ pub mod window_change_detector;
 #[cfg(target_os = "macos")]
 pub mod windows;
 
+#[cfg(all(test, target_os = "macos"))]
+mod focus_guard_sentinel_tests;
+
 use cua_driver_core::tool::ToolRegistry;
 
 /// Register all macOS tools.  For programs that don't restructure `main`
