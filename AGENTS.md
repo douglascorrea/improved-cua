@@ -41,3 +41,17 @@ Before declaring a pull request ready or merging it, inspect its final changed
 files and query its current GitHub title. Correct the title yourself when the
 scope or release impact changed during implementation, and wait for
 `CI: Release metadata` to pass. Do not leave title correction for a maintainer.
+
+## Agent skills
+
+### Issue tracker
+
+Issues and PRDs live as GitHub issues on `douglascorrea/improved-cua` via the `gh` CLI; external PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical roles use their own names verbatim (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
