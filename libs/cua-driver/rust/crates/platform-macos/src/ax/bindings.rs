@@ -518,16 +518,29 @@ pub unsafe fn set_number_attr(element: AXUIElementRef, attr_name: &str, value: f
     AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), cf_value.as_CFTypeRef())
 }
 
+/// Set an AX attribute to a CFBoolean value.
+///
+/// # Safety
+///
+/// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
+pub unsafe fn set_bool_attr(element: AXUIElementRef, attr_name: &str, value: bool) -> AXError {
+    use core_foundation::boolean::CFBoolean;
+    let attr = CFStr::new(attr_name);
+    let cf_value = if value {
+        CFBoolean::true_value()
+    } else {
+        CFBoolean::false_value()
+    };
+    AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), cf_value.as_CFTypeRef())
+}
+
 /// Set an AX attribute to a CFBoolean true value.
 ///
 /// # Safety
 ///
 /// `element` must be a valid, live `AXUIElementRef` for the duration of the call.
 pub unsafe fn set_bool_attr_true(element: AXUIElementRef, attr_name: &str) -> AXError {
-    use core_foundation::boolean::CFBoolean;
-    let attr = CFStr::new(attr_name);
-    let cf_true = CFBoolean::true_value();
-    AXUIElementSetAttributeValue(element, attr.as_concrete_TypeRef(), cf_true.as_CFTypeRef())
+    set_bool_attr(element, attr_name, true)
 }
 
 /// Signal to a Chromium/Electron application root that a real assistive client
