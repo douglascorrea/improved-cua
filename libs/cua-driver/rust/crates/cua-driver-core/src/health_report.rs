@@ -49,6 +49,7 @@ pub const NAME_TCC_ACCESSIBILITY: &str = "tcc_accessibility";
 pub const NAME_TCC_SCREEN_RECORDING: &str = "tcc_screen_recording";
 pub const NAME_AX_CAPABILITY: &str = "ax_capability";
 pub const NAME_SCREEN_CAPTURE_CAPABILITY: &str = "screen_capture_capability";
+pub const NAME_PRIVATE_API_MATRIX: &str = "private_api_matrix";
 
 /// Checks whose failure marks the whole report as `failed` (vs
 /// `degraded`). Binary, platform, and the MCP session itself are
@@ -85,6 +86,28 @@ pub enum Overall {
     Failed,
 }
 
+/// One row of the macOS version×feature matrix: a single private symbol
+/// (or version-gated capability) and whether it resolved on the running
+/// OS. Emitted under `CheckData.symbols` by the macOS
+/// `private_api_matrix` check. Adding new optional fields here is
+/// non-breaking under `schema_version="1"`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SymbolStatus {
+    /// dlsym name (or capability label for selector-gated features).
+    pub name: String,
+    /// What the symbol gates, in consumer-readable terms.
+    pub feature: String,
+    /// Whether the symbol resolved on this machine.
+    pub resolved: bool,
+    /// Whether the running macOS version is expected to export it.
+    pub expected: bool,
+    /// First macOS version known to export it (`"15.0"`), when the
+    /// symbol is version-gated. Omitted when expected on every
+    /// supported macOS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
 /// Per-check structured data. Kept as a fixed set of optional fields —
 /// not a free-form map — so the JSON shape is statically known. Adding
 /// new optional fields here is non-breaking under `schema_version="1"`;
@@ -104,6 +127,8 @@ pub struct CheckData {
     pub display_count: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbols: Option<Vec<SymbolStatus>>,
 }
 
 impl CheckData {
@@ -117,6 +142,7 @@ impl CheckData {
             && self.architecture.is_none()
             && self.display_count.is_none()
             && self.error_detail.is_none()
+            && self.symbols.is_none()
     }
 }
 
@@ -355,7 +381,7 @@ If both are given, `include` wins.
 Canonical check names:
   macOS  : binary_version, platform_supported, session_active,
            bundle_identity, tcc_accessibility, tcc_screen_recording,
-           ax_capability, screen_capture_capability
+           ax_capability, screen_capture_capability, private_api_matrix
   Windows: binary_version, platform_supported, session_active,
            ax_capability (via UIA), screen_capture_capability (via DXGI)
   Linux  : binary_version, platform_supported, session_active,
@@ -736,6 +762,42 @@ mod tests {
             description.contains(r#"schema_version="1""#)
                 || description.contains(r#"schema_version: "1""#),
             "schema_version=1 must be documented in the tool description"
+        );
+    }
+
+    // ── version×feature matrix contract (G9) ────────────────────────
+
+    #[test]
+    fn check_data_symbols_serialize_when_present_and_omit_when_absent() {
+        // Empty data omits the field entirely so the wire format stays clean.
+        let empty = serde_json::to_value(CheckData::default()).unwrap();
+        assert!(empty.get("symbols").is_none());
+
+        let mut data = CheckData::default();
+        assert!(data.is_empty());
+        data.symbols = Some(vec![SymbolStatus {
+            name: "SLEventPostToPid".to_owned(),
+            feature: "SkyLight per-pid event posting".to_owned(),
+            resolved: true,
+            expected: true,
+            since: None,
+        }]);
+        assert!(!data.is_empty(), "a populated symbols list is non-empty data");
+        let v = serde_json::to_value(&data).unwrap();
+        assert_eq!(v["symbols"][0]["name"], "SLEventPostToPid");
+        assert_eq!(v["symbols"][0]["resolved"], true);
+        assert_eq!(v["symbols"][0]["expected"], true);
+        assert!(v["symbols"][0].get("since").is_none());
+    }
+
+    #[test]
+    fn private_api_matrix_name_is_canonical_and_documented() {
+        assert_eq!(NAME_PRIVATE_API_MATRIX, "private_api_matrix");
+        // The tool description enumerates the canonical macOS check names;
+        // the matrix check must appear there or consumers cannot discover it.
+        assert!(
+            def().description.contains(NAME_PRIVATE_API_MATRIX),
+            "private_api_matrix must be documented in the tool description"
         );
     }
 
