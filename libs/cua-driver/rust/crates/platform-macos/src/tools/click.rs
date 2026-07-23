@@ -430,9 +430,10 @@ impl Tool for ClickTool {
             // not the shared "default" one (which would light the wrong cursor
             // and stomp default for a non-default session).
             let ck = cursor_key.clone();
-            let result = focus_guard::with_focus_suppressed(
+            let result = focus_guard::with_focus_suppressed_ax(
                 if foreground { None } else { Some(pid) },
                 prior_front,
+                Some(element_ptr),
                 "click.AXPress",
                 || async move {
                     tokio::task::spawn_blocking(move || {
@@ -643,6 +644,14 @@ impl Tool for ClickTool {
                     let Some(element) = element_at_screen_position(pid, screen_x, screen_y) else {
                         return Ok::<bool, anyhow::Error>(false);
                     };
+                    // Synthetic focus around the background AX dispatch
+                    // (FocusGuard layer 2). Skips itself when the target
+                    // happens to be frontmost or the window is minimized.
+                    let focus_guard = crate::focus_guard::SyntheticFocusGuard::arm_if_background(
+                        pid,
+                        apps::frontmost_pid(),
+                        element as usize,
+                    );
                     let delivered = if focus_only {
                         crate::input::ax_actions::focus_element(element as usize).is_ok()
                     } else {
@@ -650,6 +659,11 @@ impl Tool for ClickTool {
                         AXUIElementPerformAction(element, press.as_concrete_TypeRef())
                             == kAXErrorSuccess
                     };
+                    // Restore BEFORE releasing the element — the guard's
+                    // restore writes touch it.
+                    if let Some(g) = focus_guard {
+                        g.restore();
+                    }
                     CFRelease(element as _);
                     Ok(delivered)
                 })

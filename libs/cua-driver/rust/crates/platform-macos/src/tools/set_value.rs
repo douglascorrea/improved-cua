@@ -166,9 +166,10 @@ impl Tool for SetValueTool {
         let prior_front = apps::frontmost_pid();
         let snapshot = WindowChangeDetector::snapshot(prior_front);
 
-        let result = focus_guard::with_focus_suppressed(
+        let result = focus_guard::with_focus_suppressed_ax(
             Some(pid),
             prior_front,
+            Some(element_ptr),
             "set_value.AXValue",
             || async move {
                 tokio::task::spawn_blocking(move || {

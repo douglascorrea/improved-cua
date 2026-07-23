@@ -281,9 +281,10 @@ impl Tool for TypeTextTool {
         // "success but nothing typed" symptom.
         let is_terminal_target = crate::terminal::is_terminal_pid(pid);
 
-        let result = focus_guard::with_focus_suppressed(
+        let result = focus_guard::with_focus_suppressed_ax(
             Some(pid),
             prior_front,
+            element_ptr.map(|(ptr, _)| ptr),
             "type_text.AXSelectedText",
             || async move {
                 tokio::task::spawn_blocking(move || {
