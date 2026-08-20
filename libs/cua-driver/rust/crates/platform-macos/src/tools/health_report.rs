@@ -12,8 +12,9 @@
 use async_trait::async_trait;
 use cua_driver_core::health_report::{
     CheckData, CheckEntry, HealthCheckProvider, NAME_AX_CAPABILITY, NAME_BINARY_VERSION,
-    NAME_BUNDLE_IDENTITY, NAME_PLATFORM_SUPPORTED, NAME_SCREEN_CAPTURE_CAPABILITY,
-    NAME_SESSION_ACTIVE, NAME_TCC_ACCESSIBILITY, NAME_TCC_SCREEN_RECORDING,
+    NAME_BUNDLE_IDENTITY, NAME_PLATFORM_SUPPORTED, NAME_PRIVATE_API_MATRIX,
+    NAME_SCREEN_CAPTURE_CAPABILITY, NAME_SESSION_ACTIVE, NAME_TCC_ACCESSIBILITY,
+    NAME_TCC_SCREEN_RECORDING, SymbolStatus,
 };
 
 use crate::permissions::status::{accessibility_granted, current_status, screen_recording_granted};
@@ -29,6 +30,7 @@ pub const MACOS_CHECK_NAMES: &[&str] = &[
     NAME_TCC_SCREEN_RECORDING,
     NAME_AX_CAPABILITY,
     NAME_SCREEN_CAPTURE_CAPABILITY,
+    NAME_PRIVATE_API_MATRIX,
 ];
 
 /// The canonical bundle identifier whose TCC grants matter for the
@@ -58,6 +60,7 @@ impl HealthCheckProvider for MacosHealthProvider {
             NAME_TCC_SCREEN_RECORDING => check_tcc_screen_recording(),
             NAME_AX_CAPABILITY => check_ax_capability(),
             NAME_SCREEN_CAPTURE_CAPABILITY => check_screen_capture_capability(),
+            NAME_PRIVATE_API_MATRIX => check_private_api_matrix(),
             // Defensive: the dispatcher only forwards names in
             // `check_names()`, so this branch should be unreachable.
             other => CheckEntry::skip(
@@ -214,6 +217,70 @@ fn check_screen_capture_capability() -> CheckEntry {
     )
 }
 
+/// The version×feature matrix (gap G9, issue #8): every private
+/// SkyLight/libobjc symbol the driver depends on, resolved against the
+/// running macOS version. A required symbol missing on an OS that should
+/// export it is a loud failure — never the silent degradation of the
+/// pre-#8 resolver. Optional rows (unwired features) are informational.
+fn check_private_api_matrix() -> CheckEntry {
+    let version = crate::version_matrix::macos_version();
+    let matrix = crate::version_matrix::collect_matrix();
+
+    let symbols: Vec<SymbolStatus> = matrix
+        .iter()
+        .map(|row| SymbolStatus {
+            name: row.name.to_owned(),
+            feature: row.feature.to_owned(),
+            resolved: row.resolved,
+            expected: row.expected,
+            since: row.since.map(|(major, minor)| format!("{major}.{minor}")),
+        })
+        .collect();
+    let data = CheckData {
+        os_version: Some(version.to_string()),
+        architecture: Some(arch_label().to_owned()),
+        symbols: Some(symbols),
+        ..Default::default()
+    };
+
+    let missing_required: Vec<&str> = matrix
+        .iter()
+        .filter(|r| r.expected && r.required && !r.resolved)
+        .map(|r| r.name)
+        .collect();
+    if !missing_required.is_empty() {
+        return CheckEntry::fail(
+            NAME_PRIVATE_API_MATRIX,
+            format!(
+                "{} required private symbol(s) unresolved on macOS {version}: {}",
+                missing_required.len(),
+                missing_required.join(", ")
+            ),
+            "SkyLight private API drift on this macOS version. Fallback paths are active \
+             and logged at warn level (tracing); validate this OS against \
+             docs/research/platform-macos-capability-map.md §7 and extend the \
+             version_matrix registry before shipping.",
+        )
+        .with_data(data);
+    }
+
+    let expected_total = matrix.iter().filter(|r| r.expected).count();
+    let optional_missing: Vec<&str> = matrix
+        .iter()
+        .filter(|r| r.expected && !r.required && !r.resolved)
+        .map(|r| r.name)
+        .collect();
+    let mut message =
+        format!("{expected_total}/{expected_total} expected private symbols resolved on macOS {version}.");
+    if !optional_missing.is_empty() {
+        message.push_str(&format!(
+            " Optional (non-fatal) unresolved: {}.",
+            optional_missing.join(", ")
+        ));
+    }
+    CheckEntry::pass(NAME_PRIVATE_API_MATRIX, message).with_data(data)
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 /// Read the running process's `CFBundleIdentifier` via CoreFoundation.
@@ -368,5 +435,70 @@ mod tests {
         // Every documented macOS check appears, in declared order.
         let expected: Vec<&str> = MACOS_CHECK_NAMES.to_vec();
         assert_eq!(names, expected);
+    }
+
+    // ── private_api_matrix (G9, issue #8) ────────────────────────────
+
+    #[test]
+    fn private_api_matrix_passes_on_this_host_and_lists_every_symbol() {
+        let _gate = crate::input::skylight::test_hook::hold_gate();
+        let entry = check_private_api_matrix();
+        assert_eq!(
+            entry.status,
+            CheckStatus::Pass,
+            "all required symbols resolve on macOS 26.5.2: {}",
+            entry.message
+        );
+        let data = entry.data.expect("matrix check must carry data");
+        assert!(data.os_version.is_some(), "OS version must be reported");
+        assert!(data.architecture.is_some());
+        let symbols = data.symbols.expect("symbol rows must be reported");
+        assert_eq!(
+            symbols.len(),
+            crate::version_matrix::SKYLIGHT_SYMBOLS.len(),
+            "every registry row appears in the report"
+        );
+        let post = symbols
+            .iter()
+            .find(|s| s.name == "SLEventPostToPid")
+            .expect("post row present");
+        assert!(post.resolved && post.expected);
+        // The version-gated auth factory row reports its since-version.
+        let auth = symbols
+            .iter()
+            .find(|s| s.name.starts_with("SLSEventAuthenticationMessage."))
+            .expect("auth factory row present");
+        assert_eq!(auth.since.as_deref(), Some("15.0"));
+        assert!(auth.resolved && auth.expected, "macOS 26 ≥ 15: {auth:?}");
+    }
+
+    #[test]
+    fn private_api_matrix_fails_loudly_on_forced_absence() {
+        let _forced = crate::input::skylight::test_hook::force_absent("SLEventPostToPid");
+        let entry = check_private_api_matrix();
+        assert_eq!(
+            entry.status,
+            CheckStatus::Fail,
+            "forced absence of a required symbol must be a loud failure"
+        );
+        assert!(
+            entry.message.contains("SLEventPostToPid"),
+            "the failing symbol is named in the message: {}",
+            entry.message
+        );
+        assert!(entry.hint.is_some(), "fail entries carry a remediation hint");
+        let symbols = entry
+            .data
+            .expect("fail entries carry the matrix")
+            .symbols
+            .expect("symbol rows present on failure");
+        let post = symbols
+            .iter()
+            .find(|s| s.name == "SLEventPostToPid")
+            .unwrap();
+        assert!(
+            !post.resolved && post.expected,
+            "the row reports unresolved-but-expected: {post:?}"
+        );
     }
 }

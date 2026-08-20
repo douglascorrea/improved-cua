@@ -264,14 +264,41 @@ pub fn type_text_global(text: &str, inter_char_delay_ms: u64) -> anyhow::Result<
     Ok(())
 }
 
+/// Trace the private→public keyboard fallback: warn once per process
+/// (the symbol resolver already logged the root cause — see
+/// `input::skylight::find_sym`), debug on every occurrence so the
+/// per-keystroke fallback rate stays observable without spamming.
+/// Never silent (gap G9, issue #8).
+fn log_public_fallback(context: &str) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            "SkyLight keyboard posting unavailable ({context}); falling back to public \
+             CGEvent::post_to_pid — Chromium-class targets may drop synthetic keys"
+        );
+    });
+    tracing::debug!("{context}: using public CGEvent::post_to_pid fallback");
+}
+
+/// Run `public_post` when the SkyLight post did not happen, logging the
+/// fallback with the call-site `context`. Extracted so the fallback
+/// wiring is unit-testable without posting real events.
+fn post_with_public_fallback(context: &str, skylight_posted: bool, public_post: impl FnOnce()) {
+    if !skylight_posted {
+        log_public_fallback(context);
+        public_post();
+    }
+}
+
 /// Post a keyboard event to `pid` via SLEventPostToPid (with auth message for
 /// Chromium/Electron support) or fall back to CGEvent::post_to_pid.
 pub(super) fn post_keyboard_event(pid: i32, event: &CGEvent) {
     let event_ptr = event.as_ptr() as *mut std::ffi::c_void;
     // attachAuthMessage = true: required for Chromium keyboard on macOS 14+.
-    if !crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, true) {
+    let posted = crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, true);
+    post_with_public_fallback("post_keyboard_event", posted, || {
         event.post_to_pid(pid as libc::pid_t);
-    }
+    });
 }
 
 fn post_key(pid: i32, key_code: u16, key_down: bool, flags: CGEventFlags) -> anyhow::Result<()> {
@@ -300,9 +327,10 @@ fn post_key_no_auth(
     event.set_flags(flags);
     let event_ptr = event.as_ptr() as *mut std::ffi::c_void;
     // attach_auth_message = false → IOHIDPostEvent path → NSMenu fires
-    if !crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, false) {
+    let posted = crate::input::skylight::post_to_pid(pid as libc::pid_t, event_ptr, false);
+    post_with_public_fallback("post_key_no_auth", posted, || {
         event.post_to_pid(pid as libc::pid_t);
-    }
+    });
     Ok(())
 }
 
@@ -405,4 +433,48 @@ pub(super) fn key_name_to_code(key: &str) -> anyhow::Result<u16> {
         _ => anyhow::bail!("Unknown key name: {key}"),
     };
     Ok(code)
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn fallback_runs_public_post_and_logs_when_skylight_unavailable() {
+        let ran = Arc::new(Mutex::new(false));
+        let ran_inner = ran.clone();
+        let logs = crate::input::skylight::test_hook::captured_logs(|| {
+            post_with_public_fallback("unit_test_context", false, || {
+                *ran_inner.lock().unwrap() = true;
+            });
+        });
+        assert!(
+            *ran.lock().unwrap(),
+            "the public fallback must run when SkyLight posting failed"
+        );
+        assert!(
+            logs.contains("unit_test_context"),
+            "the fallback log must carry the call-site context; got:\n{logs}"
+        );
+        assert!(
+            logs.contains("fallback"),
+            "the fallback must be logged, never silent; got:\n{logs}"
+        );
+    }
+
+    #[test]
+    fn no_fallback_when_skylight_posted() {
+        let logs = crate::input::skylight::test_hook::captured_logs(|| {
+            post_with_public_fallback("unit_test_context", true, || {
+                panic!("public fallback must not run after a successful SkyLight post")
+            });
+        });
+        assert!(
+            !logs.contains("unit_test_context"),
+            "no fallback logging when SkyLight delivered; got:\n{logs}"
+        );
+    }
 }
