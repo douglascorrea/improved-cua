@@ -538,9 +538,10 @@ impl Tool for ScrollTool {
         let prior_front = apps::frontmost_pid();
         let snapshot = WindowChangeDetector::snapshot(prior_front);
 
-        let result = focus_guard::with_focus_suppressed(
+        let result = focus_guard::with_focus_suppressed_ax(
             Some(pid),
             prior_front,
+            pre_focus_ptr,
             "scroll.CGEvent",
             || async move {
                 // Pre-focus the element under suppression so its

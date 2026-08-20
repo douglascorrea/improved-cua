@@ -60,6 +60,38 @@ fn enabled_pids() -> &'static Mutex<HashSet<i32>> {
     ENABLED_PIDS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// Re-assert Chromium/Electron AX enablement for `pid` at action-dispatch
+/// time (FocusGuard layer 1 reuse — see `focus_guard.rs`).
+///
+/// Elements normally reach dispatch via a tree walk, which already performs
+/// enablement, so this is almost always a cached no-op. It exists for the
+/// paths that dispatch without a fresh walk in this process. Unlike the
+/// walk-time enablement there is **no settle pump** here: the settle only
+/// matters before reading a freshly-materialized tree, and dispatch callers
+/// already hold an element.
+pub(crate) fn ensure_ax_enabled_for_pid(pid: i32) {
+    let already_enabled = enabled_pids()
+        .lock()
+        .map(|s| s.contains(&pid))
+        .unwrap_or(false);
+    if already_enabled {
+        return;
+    }
+    unsafe {
+        let app_elem = AXUIElementCreateApplication(pid);
+        if app_elem.is_null() {
+            return;
+        }
+        set_messaging_timeout(app_elem);
+        if enable_chromium_accessibility(app_elem) {
+            if let Ok(mut set) = enabled_pids().lock() {
+                set.insert(pid);
+            }
+        }
+        CFRelease(app_elem as CFTypeRef);
+    }
+}
+
 /// A single node in the AX tree.
 #[derive(Debug, Clone)]
 pub struct AXNode {
